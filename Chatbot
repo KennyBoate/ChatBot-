@@ -1,0 +1,244 @@
+import os
+import json
+import openai 
+from dotenv import load_dotenv, find_dotenv
+import panel as pn
+from datetime import datetime
+import traceback
+
+# Load environment variables
+load_dotenv(find_dotenv())
+openai.api_key = os.getenv('OPENAI_API_KEY')
+
+# Menu configuration - Now easily modifiable
+MENU = {
+    "pizzas": {
+        "pepperoni": {"sizes": {"large": 12.95, "medium": 10.00, "small": 7.00}},
+        "cheese": {"sizes": {"large": 10.95, "medium": 9.25, "small": 6.50}},
+        "eggplant": {"sizes": {"large": 11.95, "medium": 9.75, "small": 6.75}}
+    },
+    "toppings": {
+        "extra cheese": 2.00,
+        "mushrooms": 1.50,
+        "sausage": 3.00,
+        "canadian bacon": 3.50,
+        "AI sauce": 1.50,
+        "peppers": 1.00
+    },
+    "sides": {
+        "fries": {"sizes": {"large": 4.50, "small": 3.50}},
+        "greek salad": {"price": 7.25}
+    },
+    "drinks": {
+        "coke": {"sizes": {"large": 3.00, "medium": 2.00, "small": 1.00}},
+        "sprite": {"sizes": {"large": 3.00, "medium": 2.00, "small": 1.00}},
+        "bottled water": {"price": 5.00}
+    }
+}
+
+# Create menu string for the bot
+def create_menu_string():
+    menu_str = "Menu:\n\n"
+    
+    # Add pizzas
+    menu_str += "PIZZAS:\n"
+    for pizza, details in MENU["pizzas"].items():
+        sizes = details["sizes"]
+        menu_str += f"{pizza}: large ${sizes['large']}, medium ${sizes['medium']}, small ${sizes['small']}\n"
+    
+    # Add toppings
+    menu_str += "\nTOPPINGS:\n"
+    for topping, price in MENU["toppings"].items():
+        menu_str += f"{topping}: ${price}\n"
+    
+    # Add sides
+    menu_str += "\nSIDES:\n"
+    for side, details in MENU["sides"].items():
+        if "sizes" in details:
+            menu_str += f"{side}: large ${details['sizes']['large']}, small ${details['sizes']['small']}\n"
+        else:
+            menu_str += f"{side}: ${details['price']}\n"
+    
+    # Add drinks
+    menu_str += "\nDRINKS:\n"
+    for drink, details in MENU["drinks"].items():
+        if "sizes" in details:
+            menu_str += f"{drink}: large ${details['sizes']['large']}, medium ${details['sizes']['medium']}, small ${details['sizes']['small']}\n"
+        else:
+            menu_str += f"{drink}: ${details['price']}\n"
+    
+    return menu_str
+
+def save_order(order_details):
+    """Save order to a JSON file"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"orders/order_{timestamp}.json"
+    
+    # Create orders directory if it doesn't exist
+    os.makedirs("orders", exist_ok=True)
+    
+    with open(filename, 'w') as f:
+        json.dump(order_details, f, indent=4)
+    return filename
+
+def get_completion_from_messages(messages, temperature=0):
+    """Get completion from OpenAI with error handling"""
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            temperature=temperature
+        )
+        return response.choices[0].message["content"]
+    except Exception as e:
+        error_msg = f"Error getting response from OpenAI: {str(e)}"
+        print(error_msg)
+        return f"I apologize, but I encountered an error. Please try again. Error: {error_msg}"
+
+# Initialize Panel
+pn.extension()
+
+# Create empty panels list
+panels = []
+
+# Initialize context with menu
+context = [{
+    'role': 'system',
+    'content': f"""
+    You are OrderBot, an automated service to collect orders for a pizza restaurant. 
+    You first greet the customer, then collect the order, 
+    and then ask if it's a pickup or delivery. 
+    You wait to collect the entire order, then summarize it and check for a final 
+    time if the customer wants to add anything else. 
+    If it's a delivery, you ask for address. 
+    Finally you collect the payment.
+    Make sure to clarify all options, extras and sizes to uniquely 
+    identify the item from the menu.
+    You respond in a short, very conversational friendly style. 
+
+    {create_menu_string()}
+    """
+}]
+
+def reset_conversation(_):
+    """Reset the conversation state"""
+    global context, panels
+    context = [context[0]]  # Keep only the system message
+    panels = []
+    inp.value = ""
+    return pn.Column(*panels)
+
+def collect_messages(_):
+    """Collect and process messages with error handling"""
+    try:
+        prompt = inp.value
+        inp.value = ''
+        
+        # Don't process empty messages
+        if not prompt.strip():
+            return pn.Column(*panels)
+        
+        context.append({'role': 'user', 'content': f"{prompt}"})
+        response = get_completion_from_messages(context)
+        
+        # Check if this might be a final order
+        if any(keyword in response.lower() for keyword in ['total', 'payment', 'complete']):
+            try:
+                # Extract order details
+                order_details = {
+                    'timestamp': datetime.now().isoformat(),
+                    'conversation': context,
+                    'final_response': response
+                }
+                # Save the order
+                filename = save_order(order_details)
+                response += f"\n\nOrder saved to: {filename}"
+            except Exception as e:
+                print(f"Error saving order: {str(e)}")
+        
+        context.append({'role': 'assistant', 'content': f"{response}"})
+        panels.append(
+            pn.Row('User:', pn.pane.Markdown(prompt, width=600)))
+        panels.append(
+            pn.Row('Assistant:', pn.pane.Markdown(response, width=600, style={'background-color': '#F6F6F6'})))
+        
+        return pn.Column(*panels)
+    except Exception as e:
+        error_msg = f"Error processing message: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        panels.append(
+            pn.Row('System:', pn.pane.Markdown(f"Error: {str(e)}", width=600, style={'background-color': '#FFE6E6'})))
+        return pn.Column(*panels)
+
+# Create graphical menu display
+def create_menu_display():
+    """Create a graphical representation of the menu"""
+    menu_md = "# Pizza Restaurant Menu\n\n"
+    
+    # Pizzas section
+    menu_md += "## 🍕 Pizzas\n"
+    for pizza, details in MENU["pizzas"].items():
+        menu_md += f"### {pizza.title()}\n"
+        for size, price in details["sizes"].items():
+            menu_md += f"- {size.title()}: ${price}\n"
+        menu_md += "\n"
+    
+    # Toppings section
+    menu_md += "## 🧀 Toppings\n"
+    for topping, price in MENU["toppings"].items():
+        menu_md += f"- {topping.title()}: ${price}\n"
+    menu_md += "\n"
+    
+    # Sides section
+    menu_md += "## 🍟 Sides\n"
+    for side, details in MENU["sides"].items():
+        if "sizes" in details:
+            menu_md += f"### {side.title()}\n"
+            for size, price in details["sizes"].items():
+                menu_md += f"- {size.title()}: ${price}\n"
+        else:
+            menu_md += f"- {side.title()}: ${details['price']}\n"
+    menu_md += "\n"
+    
+    # Drinks section
+    menu_md += "## 🥤 Drinks\n"
+    for drink, details in MENU["drinks"].items():
+        if "sizes" in details:
+            menu_md += f"### {drink.title()}\n"
+            for size, price in details["sizes"].items():
+                menu_md += f"- {size.title()}: ${price}\n"
+        else:
+            menu_md += f"- {drink.title()}: ${details['price']}\n"
+    
+    return pn.pane.Markdown(menu_md)
+
+# Set up the interface
+inp = pn.widgets.TextInput(value="", placeholder='Enter text here...')
+button_conversation = pn.widgets.Button(name="Send", button_type="primary")
+button_reset = pn.widgets.Button(name="Reset Conversation", button_type="warning")
+menu_display = create_menu_display()
+
+# Bind buttons to functions
+interactive_conversation = pn.bind(collect_messages, button_conversation)
+reset_bind = pn.bind(reset_conversation, button_reset)
+
+# Create the dashboard with menu
+dashboard = pn.Column(
+    pn.Row(
+        pn.Column(
+            menu_display,
+            width=400,
+            background='white',
+            css_classes=['menu-panel']
+        ),
+        pn.Column(
+            inp,
+            pn.Row(button_conversation, button_reset),
+            pn.panel(interactive_conversation, loading_indicator=True, height=400),
+            width=600
+        )
+    )
+)
+
+# Make the dashboard servable
+dashboard.servable()
